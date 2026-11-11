@@ -1,99 +1,60 @@
-name: debezium-lab
-
+name: debezium
 services:
-  mongo:
-    image: docker.io/library/mongo:8.0.34
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo-data:/data/db
-    healthcheck:
-      test:
-        - CMD
-        - mongosh
-        - --quiet
-        - --eval
-        - |
-          let ok = false;
-          try { ok = rs.status().myState === 1; }
-          catch (e) { rs.initiate({_id: "rs0", members: [{_id: 0, host: "mongo:27017"}]}); }
-          quit(ok ? 0 : 1);
-      # mongosh is a ~250 MB Node process; probing often starves the 2 GiB podman VM
-      interval: 10s
-      timeout: 10s
-      retries: 20
-
-  kafka:
-    image: docker.io/apache/kafka:4.3.1
-    ports:
-      - "9094:9094"
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_HEAP_OPTS: -Xms128m -Xmx256m
-    healthcheck:
-      # A port probe, not kafka-topics.sh, which starts a whole JVM per check
-      test: ["CMD", "nc", "-z", "localhost", "9092"]
-      interval: 5s
-      timeout: 20s
-      retries: 30
-
   connect:
-    image: quay.io/debezium/connect:3.7.1.Final
-    # Load only the MongoDB plugin; the image ships 13 and loading all of them costs memory the 2 GiB VM lacks
-    entrypoint:
-      - sh
-      - -c
-      - mkdir -p /tmp/plugins && ln -sfn /kafka/connect/debezium-connector-mongodb /tmp/plugins/ && exec /docker-entrypoint.sh start
+    image: quay.io/debezium/connect:${DBZ_VERSION}
+    container_name: kafka-connect
+    restart: unless-stopped
     ports:
-      - "8083:8083"
+      - "127.0.0.1:8083:8083"          # REST has no auth, so keep it on localhost only
     environment:
-      CONNECT_PLUGIN_PATH: /tmp/plugins
-      BOOTSTRAP_SERVERS: kafka:9092
-      GROUP_ID: debezium-connect
-      CONFIG_STORAGE_TOPIC: connect_configs
-      OFFSET_STORAGE_TOPIC: connect_offsets
-      STATUS_STORAGE_TOPIC: connect_statuses
-      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
-      HEAP_OPTS: -Xms128m -Xmx384m
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8083/"]
-      interval: 5s
-      timeout: 5s
-      retries: 40
-    depends_on:
-      kafka:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
+      BOOTSTRAP_SERVERS: ${CC_BOOTSTRAP}
+      GROUP_ID: dbz-connect
+      CONFIG_STORAGE_TOPIC: dbz-connect-configs
+      OFFSET_STORAGE_TOPIC: dbz-connect-offsets
+      STATUS_STORAGE_TOPIC: dbz-connect-status
+      OFFSET_STORAGE_REPLICATION_FACTOR: 3
+      STATUS_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 3
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_TOPIC_CREATION_ENABLE: "true"
+      CONNECT_CONFIG_PROVIDERS: file
+      CONNECT_CONFIG_PROVIDERS_FILE_CLASS: org.apache.kafka.common.config.provider.FileConfigProvider
 
-  # Redpanda Console over Kafbat Kafka UI: ~55 MB vs ~300 MB RSS, which matters in a 2 GiB podman VM
-  console:
-    image: docker.io/redpandadata/console:v3.14.0
-    ports:
-      - "8080:8080"
-    environment:
-      CONFIG_FILEPATH: /etc/console/config.yaml
+      # Confluent Cloud auth: worker, producer AND consumer all need it
+      CONNECT_SECURITY_PROTOCOL: SASL_SSL
+      CONNECT_SASL_MECHANISM: PLAIN
+      CONNECT_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="${CC_API_KEY}" password="${CC_API_SECRET}";'
+      CONNECT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: https
+      CONNECT_PRODUCER_SECURITY_PROTOCOL: SASL_SSL
+      CONNECT_PRODUCER_SASL_MECHANISM: PLAIN
+      CONNECT_PRODUCER_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="${CC_API_KEY}" password="${CC_API_SECRET}";'
+      CONNECT_PRODUCER_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: https
+      CONNECT_CONSUMER_SECURITY_PROTOCOL: SASL_SSL
+      CONNECT_CONSUMER_SASL_MECHANISM: PLAIN
+      CONNECT_CONSUMER_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="${CC_API_KEY}" password="${CC_API_SECRET}";'
+      CONNECT_CONSUMER_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: https
+
+      # Confluent-recommended client tuning + large docs
+      CONNECT_REQUEST_TIMEOUT_MS: 20000
+      CONNECT_RETRY_BACKOFF_MS: 500
+      CONNECT_PRODUCER_MAX_REQUEST_SIZE: 8388608
+      CONNECT_PRODUCER_COMPRESSION_TYPE: zstd
+
+      KAFKA_HEAP_OPTS: "-Xms1g -Xmx2g"   # size to the VM; 2g is plenty for one Mongo task
     volumes:
-      - ./console/config.yaml:/etc/console/config.yaml:ro
-    depends_on:
-      kafka:
-        condition: service_healthy
-
-volumes:
-  mongo-data:
+      - ./secrets:/secrets:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8083/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }
