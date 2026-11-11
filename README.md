@@ -162,7 +162,7 @@ The other topics keep plain JSON arrays. To return a topic to plain arrays, fix 
 
 ## Message format
 
-Each message value is the document as plain JSON with no schema envelope. A `ReplaceField` transform per collection keeps only the fields listed in `transforms.<name>.include`. Every message also carries:
+Each message value is the whole MongoDB document as plain JSON with no schema envelope. The connector does not drop any field, so consumers receive every field the owning service stores. Every message also carries:
 
 - `__op`: `c` for create, `u` for update, `r` for a snapshot read
 - `__source_ts_ms`: the time of the change in MongoDB, in milliseconds
