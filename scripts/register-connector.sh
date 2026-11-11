@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="${1:-$ROOT/connectors/mongo-inventory.json}"
+CONFIG="${1:-$ROOT/connectors/thaimart-mongo.json}"
 CONNECT_URL="${CONNECT_URL:-http://localhost:8083}"
 NAME="$(basename "$CONFIG" .json)"
 
